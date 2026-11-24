@@ -43,12 +43,13 @@ export function boneDefs(weaponHand: 'N' | 'F'): BoneDef[] {
   ];
 }
 
-export type BodyType = 'adult' | 'child' | 'chibi';
-export const BODY_LABEL: Record<BodyType, string> = { adult: 'Người lớn', child: 'Trẻ em', chibi: 'Chibi (đầu to)' };
+export type BodyType = 'adult' | 'female' | 'child' | 'chibi';
+export const BODY_LABEL: Record<BodyType, string> = { adult: 'Người lớn (nam)', female: 'Người lớn (nữ)', child: 'Trẻ em', chibi: 'Chibi (đầu to)' };
 
 // Fractions of the character height measured from the top of the head.
-const PROPS: Record<BodyType, { neck: number; shoulder: number; hip: number; knee: number; ankle: number; upper: number; fore: number }> = {
+export const PROPS: Record<BodyType, { neck: number; shoulder: number; hip: number; knee: number; ankle: number; upper: number; fore: number }> = {
   adult: { neck: 0.14, shoulder: 0.19, hip: 0.5, knee: 0.73, ankle: 0.94, upper: 0.16, fore: 0.14 },
+  female: { neck: 0.145, shoulder: 0.195, hip: 0.51, knee: 0.735, ankle: 0.945, upper: 0.155, fore: 0.135 },
   child: { neck: 0.21, shoulder: 0.26, hip: 0.57, knee: 0.77, ankle: 0.94, upper: 0.14, fore: 0.12 },
   chibi: { neck: 0.4, shoulder: 0.44, hip: 0.7, knee: 0.84, ankle: 0.94, upper: 0.11, fore: 0.09 },
 };
@@ -93,11 +94,44 @@ export function guessFacing(s: Silhouette): 1 | -1 {
   return score < 0 ? -1 : 1;
 }
 
+/** Finds the neck: the narrowest row under the head. Returns its height as a fraction of the character. */
+export function findNeck(s: Silhouette): number | null {
+  const { y0, y1 } = s.bbox;
+  const H = y1 - y0;
+  let headW = 0, best = -1, bw = 1e9;
+  const width = (y: number) => {
+    const runs = rowRuns(s, y, H * 0.01);
+    if (!runs.length) return 0;
+    // widest run = the body (weapons are thin)
+    return Math.max(...runs.map(r => r[1] - r[0]));
+  };
+  for (let f = 0.03; f <= 0.5; f += 0.005) {
+    const y = y0 + H * f;
+    const w = width(y);
+    if (f < 0.12 || w > headW * 0.9 && best < 0) headW = Math.max(headW, w);
+    if (f >= 0.08 && headW > 0 && w > 0 && w < bw && w < headW * 0.8) { bw = w; best = f; }
+    // stop once the shoulders are clearly wider than the head
+    if (best > 0 && w > headW * 1.1) break;
+  }
+  return best > 0 ? best : null;
+}
+
+/** Picks adult / child / chibi from how big the head is. */
+export function guessBodyType(s: Silhouette): BodyType {
+  const n = findNeck(s);
+  if (n === null) return 'adult';
+  return n < 0.19 ? 'adult' : n < 0.29 ? 'child' : 'chibi';
+}
+
 /** A first guess for every joint from the silhouette and body proportions. The user then drags them. */
 export function guessJoints(s: Silhouette, body: BodyType, facing: 1 | -1): Joints {
   const { x0, y0, x1, y1 } = s.bbox;
   const H = y1 - y0;
-  const P = PROPS[body];
+  const P0 = PROPS[body];
+  // shift the upper body to the neck that was actually found (if it is close to the expected one)
+  const nk = findNeck(s);
+  const dN = nk !== null && Math.abs(nk - P0.neck) < 0.08 ? nk - P0.neck : 0;
+  const P = { ...P0, neck: P0.neck + dN, shoulder: P0.shoulder + dN, hip: P0.hip + dN * 0.5 };
   const Y = (f: number) => y0 + H * f;
   const minRun = H * 0.012;
 
@@ -139,10 +173,46 @@ export function guessJoints(s: Silhouette, body: BodyType, facing: 1 | -1): Join
   const footLen = H * (body === 'chibi' ? 0.07 : 0.08);
 
   const shoulder = { x: neckX - facing * H * 0.01, y: Y(P.shoulder) };
-  const elbowN = { x: shoulder.x + facing * H * 0.01, y: shoulder.y + H * P.upper };
-  const wristN = { x: elbowN.x + facing * H * 0.035, y: elbowN.y + H * P.fore * 0.95 };
-  const elbowF = { x: shoulder.x - facing * H * 0.02, y: shoulder.y + H * P.upper * 0.97 };
-  const wristF = { x: elbowF.x + facing * H * 0.01, y: elbowF.y + H * P.fore * 0.95 };
+  let elbowN = { x: shoulder.x + facing * H * 0.01, y: shoulder.y + H * P.upper };
+  let wristN = { x: elbowN.x + facing * H * 0.035, y: elbowN.y + H * P.fore * 0.95 };
+  let elbowF = { x: shoulder.x - facing * H * 0.02, y: shoulder.y + H * P.upper * 0.97 };
+  let wristF = { x: elbowF.x + facing * H * 0.01, y: elbowF.y + H * P.fore * 0.95 };
+
+  // Hands that stick out in front of / behind the body (arms swinging while walking).
+  const armLen = H * (P.upper + P.fore);
+  const bandTop = shoulder.y + H * P.upper * 0.6, bandBot = Math.min(Y(P.hip) + H * 0.08, shoulder.y + armLen * 1.05);
+  let front: Vec | null = null, back: Vec | null = null;
+  let torsoFront = -1e9, torsoBack = -1e9;
+  for (let y = bandTop; y <= bandBot; y += 2) {
+    for (const r of rowRuns(s, y, 2)) {
+      for (const x of [r[0], r[1]]) {
+        const dx = (x - chestX) * facing;
+        if (Math.abs(x - chestX) > armLen * 0.95) continue; // a weapon blade, not a hand
+        if (dx > 0 && (!front || dx > (front.x - chestX) * facing)) front = { x, y };
+        if (dx < 0 && (!back || -dx > (chestX - back.x) * facing)) back = { x, y };
+      }
+    }
+  }
+  for (const r of rowRuns(s, Y((P.shoulder + P.hip) / 2), minRun)) {
+    if (r[0] <= chestX && r[1] >= chestX) { torsoFront = facing > 0 ? r[1] : -r[0]; torsoBack = facing > 0 ? -r[0] : r[1]; }
+  }
+  const sticks = (p: Vec | null, side: 1 | -1) => {
+    if (!p) return false;
+    const reach = side > 0 ? p.x * facing - torsoFront : -p.x * facing - torsoBack;
+    return reach > H * 0.025;
+  };
+  const place = (hand: Vec): [Vec, Vec] => {
+    // wrist a bit inside the hand tip, elbow halfway with a slight bend backwards
+    const dx = hand.x - shoulder.x, dy = hand.y - shoulder.y;
+    const L = Math.hypot(dx, dy) || 1;
+    const wl = Math.max(0, L - H * 0.035);
+    const w = { x: shoulder.x + dx / L * wl, y: shoulder.y + dy / L * wl };
+    const e = { x: (shoulder.x + w.x) / 2 - facing * H * 0.012, y: (shoulder.y + w.y) / 2 };
+    return [e, w];
+  };
+  // near arm swings opposite to the near (front) leg, so: hand behind = near arm, hand in front = far arm
+  if (sticks(back, -1)) [elbowN, wristN] = place(back!);
+  if (sticks(front, 1)) [elbowF, wristF] = place(front!);
 
   return {
     head: { x: headX, y: y0 + H * 0.01 },

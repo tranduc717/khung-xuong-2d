@@ -4,7 +4,7 @@ import {
   keepLargestComponents, imageToCanvas, type Mask, type RGBAImage,
 } from './image';
 import {
-  guessFacing, guessJoints, restBones, JOINT_LABEL, BODY_LABEL, solvePose,
+  guessFacing, guessJoints, guessBodyType, restBones, JOINT_LABEL, BODY_LABEL, solvePose,
   type BodyType, type JointId, type Joints, type Vec, type RestBone, type Mat, type BoneId,
 } from './skeleton';
 import { Sam, type SamStatus } from './sam';
@@ -499,10 +499,12 @@ function drawBonesOverlay(mats: Map<BoneId, Mat>) {
 
 // ---------------------------------------------------------------- navigation & panels
 let unmount3d: (() => void) | null = null;
+let bodyChosen = false;
 async function goto(n: Step) {
   if (n !== 6 && n > 1 && !S.cut) return;
   if (n >= 2 && n <= 5 && !S.joints && S.cut) {
     S.facing = guessFacing({ mask: S.sil!, w: S.cut.w, h: S.cut.h, bbox: S.bbox! });
+    if (!bodyChosen) S.body = guessBodyType({ mask: S.sil!, w: S.cut.w, h: S.cut.h, bbox: S.bbox! });
     S.joints = guessJoints({ mask: S.sil!, w: S.cut.w, h: S.cut.h, bbox: S.bbox! }, S.body, S.facing);
   }
   S.step = n;
@@ -517,8 +519,17 @@ async function goto(n: Step) {
     try { ensureRig(); } catch (e) { console.error(e); alert('Dựng xương lỗi: ' + (e as Error).message); }
     busy(null);
   }
-  if (n === 6 && !unmount3d) unmount3d = mountMannequin3D($('#mann3d'), { getRig: () => S.rig, poseOptions, getAction: () => S.action });
   renderPanel();
+  if (n === 6 && !unmount3d) {
+    unmount3d = mountMannequin3D($('#mann3d'), {
+      getRig: () => S.rig, poseOptions, getAction: () => S.action,
+      setBody: b => {
+        S.body = b;
+        bodyChosen = true;
+        if (S.cut) { reguess(); goto(2); } else alert('Đã chọn tỉ lệ. Hãy tải ảnh nhân vật ở bước 1, app sẽ dùng tỉ lệ này để đoán khớp.');
+      },
+    });
+  }
   draw();
 }
 
@@ -593,7 +604,7 @@ function bindPanel() {
   on('tol', 'change', e => { S.tolerance = Number((e.target as HTMLInputElement).value); cutBackground(); S.joints = null; fitView(); draw(); });
   on('aiBg', 'click', () => aiBackground());
   on('newImg', 'click', () => { $('#drop').hidden = false; });
-  on('body', 'change', e => { S.body = (e.target as HTMLSelectElement).value as BodyType; reguess(); });
+  on('body', 'change', e => { S.body = (e.target as HTMLSelectElement).value as BodyType; bodyChosen = true; reguess(); });
   on('reguess', 'click', () => reguess());
   on('weapon', 'change', e => { S.hasWeapon = (e.target as HTMLInputElement).checked; S.segDirty = true; S.rig = null; renderPanel(); draw(); });
   panel.querySelectorAll<HTMLButtonElement>('[data-face]').forEach(b => b.onclick = () => { S.facing = Number(b.dataset.face) as 1 | -1; reguess(); });

@@ -26,7 +26,7 @@ function track(keys: Array<[number, number]>) {
   };
 }
 
-interface Gait {
+export interface Gait {
   thigh: (p: number) => number; // forward = +, degrees from straight down
   knee: (p: number) => number;  // bend, + = shin goes back
   foot: (p: number) => number;  // foot angle from down; 90 = flat forward
@@ -119,4 +119,19 @@ export function poseAt(action: ActionId, p: number, bones: RestBone[], o: PoseOp
   const spineChange = (angles.spine ?? 0) - (rest.get('spine') ?? 0);
   angles.head = (rest.get('head') ?? -Math.PI / 2) + spineChange + f * g.head(p) * D;
   return { angles, root: { x: 0, y: o.height * g.bob(p) } };
+}
+
+/** Raw gait curves (degrees) for an action at phase p; idle returns a gentle breathing pose. */
+export function gaitAt(action: ActionId, p: number) {
+  if (action === 'idle') {
+    const s = Math.sin(2 * Math.PI * p);
+    return { thighN: 0, kneeN: 0, footN: 90, thighF: 0, kneeF: 0, footF: 90, armN: 2 * s, elbowN: 8, armF: 2 * s, elbowF: 8, bob: -0.004 * (1 - Math.cos(2 * Math.PI * p)), lean: 1.2 * s, head: -0.8 * s };
+  }
+  const g = action === 'run' ? RUN : WALK;
+  return {
+    thighN: g.thigh(p), kneeN: g.knee(p), footN: g.foot(p),
+    thighF: g.thigh(p + 0.5), kneeF: g.knee(p + 0.5), footF: g.foot(p + 0.5),
+    armN: g.arm(p + 0.5), elbowN: g.elbow(p + 0.5), armF: g.arm(p), elbowF: g.elbow(p),
+    bob: g.bob(p), lean: g.lean(p), head: g.head(p),
+  };
 }

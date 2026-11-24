@@ -1,3 +1,4 @@
 node_modules
 dist
 public/ort
+public/coi-serviceworker.min.js
